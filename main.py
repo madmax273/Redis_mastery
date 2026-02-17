@@ -2,6 +2,8 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 import uvicorn
 import json
+import time
+import asyncio
 from database import get_db, create_tables
 from models import User
 from schemas import UserBase, UserResponse
@@ -50,21 +52,63 @@ async def get_user(user_id: int, db: Session = Depends(get_db)):
             print("User found in cache")
             return UserResponse(**json.loads(user_json))
 
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        print("User found in database")
+        # Stampede protection: try to acquire lock
+        lock_key = f"lock:user:{user_id}"
+        lock_acquired = r.set(lock_key, "1", nx=True, ex=30)
+        
+        if lock_acquired:
+            print("Lock acquired, fetching from database")
+            try:
+                user = db.query(User).filter(User.id == user_id).first()
+                if not user:
+                    raise HTTPException(status_code=404, detail="User not found")
+                print("User found in database")
 
-        # Cache the user
-        user_dict = {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email,
-        }
-        r.set(f"user:{user_id}", json.dumps(user_dict), ex=180)
-        print("User cached")
+                # Cache the user
+                user_dict = {
+                    "id": user.id,
+                    "name": user.name,
+                    "email": user.email,
+                }
+                r.set(f"user:{user_id}", json.dumps(user_dict), ex=180)
+                print("User cached")
 
-        return UserResponse(**user)
+                return UserResponse(**user)
+            finally:
+                # Release the lock
+                r.delete(lock_key)
+        else:
+            print("Lock not acquired, waiting and retrying")
+            # Simple sleep + retry
+            await asyncio.sleep(0.1)
+            max_retries = 10
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                user_json = r.get(f"user:{user_id}")
+                if user_json:
+                    print("User found in cache after retry")
+                    return UserResponse(**json.loads(user_json))
+                
+                await asyncio.sleep(0.2)
+                retry_count += 1
+            
+            # If still not found after retries, fetch from database
+            print("Retries exhausted, fetching from database")
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            user_dict = {
+                "id": user.id,
+                "name": user.name,
+                "email": user.email,
+            }
+            r.set(f"user:{user_id}", json.dumps(user_dict), ex=180)
+            print("User cached after retries")
+            
+            return UserResponse(**user_dict)
+            
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
