@@ -53,7 +53,7 @@ async def add_message(message):
        print(time.time())
 
 # =========================above example is of asynchronous execution======================
-#but both above as same result because each function is called sequentially
+#but both above as same result because each function is called sequentially and this function will make other functions like this in parallel but this function will take as much time as much they are taking because we are awaitng and telling them to stop till these aleeps are done see async doc
 
 # async def sleeper1():
 #     print("Sleeper 1")
